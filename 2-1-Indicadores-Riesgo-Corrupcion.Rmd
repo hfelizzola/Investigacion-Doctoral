@@ -1,0 +1,306 @@
+---
+title: "Indicadores de Riesgos de Corrupcion"
+subtitle: "Investigación Doctoral"
+author: "Heriberto Felizzola"
+output:
+  html_notebook: 
+    df_print: paged
+    code_folding: hide
+    number_sections: yes
+    theme: flatly
+    toc: yes
+---
+
+```{r librerias y configuracion, echo=FALSE, message=FALSE, warning=FALSE}
+# Cargar librerias
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.align = "center")
+library(tidyverse)
+library(vroom)
+library(lubridate)
+library(DT)
+library(broom)
+library(skimr)
+library(knitr)
+```
+
+# Limpiar Datos
+
+```{r cargar datos}
+# Cargar datos
+contratos <- vroom("Datos/secop_i_ips_limpia.csv.gz", 
+                   col_select = c("nombre_entidad", "tipo_proceso", "tipo_contrato",
+                                  "cuantia_contrato","id_contratista", 
+                                  "objeto_contratar", "detalle_objeto_contratar", 
+                                  "ruta_web"))
+```
+
+Se aplica el siguiente filtro:
+
+- Contratos de mas de 10 millones.
+- Entidades con mínimo 3 contratos
+
+```{r quitar prestacion de servicios}
+# Quitar contratos de prestación de servicios
+contratos <- contratos %>% 
+  filter(cuantia_contrato >= 1e7)
+
+# Consultar las entidades con menos de 10 contratos 
+entidades_del <- contratos %>% 
+  group_by(nombre_entidad) %>% 
+  summarise(contratos = n()) %>% 
+  filter(contratos < 3)
+
+# Quitar las entidades con menos de 10 contratos
+contratos <- contratos %>% 
+  filter(!(nombre_entidad %in% entidades_del$nombre_entidad))
+```
+
+# Indicadores para la Falta de Competencia
+
+## Porcentaje de procedimientos que utilizaron adjudicación directa 
+
+Mide el porcentaje de contratos que la entidad realiza bajo la modalidad de contratación directa. Este porcentaje se puede calcular con respecto al numero de contratos o al valor de los contratos:
+
+$$
+\text{Contratación Directa} = \frac{\text{Cantidad de Contratación Directa de la Entidad}}{\text{Total de Contratación de la Entidad}} \times 100
+$$
+Donde, 
+
+- La *cantidad de contratación directa* puede ser: el numero de contratos o el valor total contratación ejecutado por la entidad bajo esta modalidad.
+- El *total de la contratación* puede ser: el numero de contratos total o el valor total de la contratación de cada entidad.
+
+```{r}
+# Calcula el porcentaje de contratación en numero de contratos
+indicadores <- contratos %>% 
+  group_by(nombre_entidad) %>% 
+  summarise(perc_contr_directa_num = sum((tipo_proceso == "Contratación Directa (Ley 1150 de 2007)")/n())*100)
+```
+
+
+```{r}
+# Calcula el porcentaje de contratación con respecto al valor de los contratos
+temp <- contratos %>% 
+  group_by(nombre_entidad, tipo_proceso) %>% 
+  summarise(valor_contratos = sum(cuantia_contrato)) %>% 
+  group_by(nombre_entidad) %>% 
+  mutate(valor_total = sum(valor_contratos),
+         perc_valor = (valor_contratos/valor_total)*100) %>% 
+  filter(tipo_proceso == "Contratación Directa (Ley 1150 de 2007)") %>% 
+  rename(perc_contr_direct_val = "perc_valor") %>% 
+  select(nombre_entidad, perc_contr_direct_val) 
+```
+
+```{r}
+# Agrupar los indicadores en una sola tabla
+indicadores <- indicadores %>% 
+  left_join(y = temp, by = "nombre_entidad") %>% 
+  mutate(perc_contr_direct_val = ifelse(is.na(perc_contr_direct_val), 0, perc_contr_direct_val))
+rm(temp)
+```
+
+## Indice de concentración de contratos HHI
+
+El índice *Herfindahl*, también conocido como Índice *Herfindahl-Hirschman* o *HHI*, es una medida del tamaño de las empresas en relación con la industria y un indicador de la cantidad de competencia entre ellas. Se calcula como la suma de los cuadrados de las cuotas de mercado de las empresas dentro de la industria (a veces limitada a las 50 empresas más grandes).
+
+$$
+HHI = \sum_{i=1}^{n}s_{i}^2
+$$
+Donde, $s_i$ es la cuota de mercado de la empresa $i$ expresada en porcentaje. Tiendo en cuenta que el indicador esta en un rango de [0,10000], se estandariza el indicador dividiendo el HHI entre 10000.
+
+$$
+HHI^{STD} = \frac{HHI}{10000} \times 100
+$$
+
+```{r HHI}
+temp <- contratos %>% 
+  group_by(nombre_entidad, id_contratista) %>% 
+  summarise(cant_contratos = n(),
+            val_contratos = sum(cuantia_contrato)) %>% 
+  group_by(nombre_entidad) %>% 
+  mutate(total_contratos_ent = sum(cant_contratos),
+         total_val_contratos_ent = sum(val_contratos),
+         si_cant = (cant_contratos/total_contratos_ent)*100,
+         si2_cant = si_cant^2,
+         si_val = (val_contratos/total_val_contratos_ent)*100,
+         si2_val = si_val^2) %>% 
+  group_by(nombre_entidad) %>% 
+  summarise(HHI_cant = (sum(si2_cant)/10000)*100,
+            HHI_val = (sum(si2_val)/10000)*100)
+```
+
+
+```{r}
+# Agrupar los indicadores en una sola tabla
+indicadores <- indicadores %>% 
+  left_join(y = temp, by = "nombre_entidad")
+rm(temp)
+```
+
+## Indice de diversidad - ID
+
+El *indice de diversidad de Simpson* (también conocido como el índice de la diversidad de las especies o índice de dominancia) es uno de los parámetros que permiten medir la biodiversidad de organismos en un hábitat. Llevado al contexto de la contratación permite medir la diversidad de contratistas en una entidad. La formula para el indice de Simpson es:
+
+$$
+ID = \frac{\sum_{j=1}^{S} n_j (n_j - 1)}{N (N - 1)}
+$$
+Donde,
+
+- $S$: Numero total de contratistas de una entidad.
+- $n_j$: es el numero o valor total de contratos adjudicados al contratista $j$.
+- $N$: es el numero o valor total de los contratos adjudicados por cada entidad.
+
+Cuando el indice es cercano a 1 existe una menor diversidad y por tanto mayor dominancia de algunos contratistas, y cuando es cercano a 0 ocurre lo contrario, existe mayor diversidad y por tanto menor dominancia de algunos contratistas.
+
+
+```{r indice de diversidad}
+# Calcula el indice de diversidad de Simpson
+temp <- contratos %>% 
+  group_by(nombre_entidad, id_contratista) %>% 
+  summarise(nj_cant = n(),
+            nj_val = sum(cuantia_contrato),
+            sub_cant = nj_cant*(nj_cant - 1),
+            sub_val = nj_val*(nj_val - 1)) %>% 
+  group_by(nombre_entidad) %>% 
+  summarise(N_cant = sum(nj_cant),
+         N_val = sum(nj_val),
+         ID_cant = (sum(sub_cant)/(N_cant*(N_cant - 1))*100),
+         ID_val = (sum(sub_val)/(N_val*(N_val - 1)))*100) %>% 
+  select(nombre_entidad, ID_cant, ID_val)
+```
+
+
+```{r}
+# Agrupar los indicadores en una sola tabla
+indicadores <- indicadores %>% 
+  left_join(y = temp, by = "nombre_entidad")
+rm(temp)
+```
+
+
+
+## Número de empresas ganadoras diferentes por cada 100 contratos
+
+Mide el número de empresas diferentes adjudicatarias de los procesos de contratación. Dado que cada entidad tiene un volumen diferente de contratación, el indice se expresó en numero de contratistas por cada 100 contratos.
+
+$$
+\text{Empresas Ganadoras} = \frac{\text{# Contratistas Diferentes}}{\text{# Contratos}} \times 100
+$$
+Dado que una mayor cantidad de empresas ganadoras representa un menor riesgo de corrupción, se hace una conversión de la siguiente manera:
+
+
+$$
+\text{Empresas Ganadoras}^{STD} = 100 - \text{Empresas Ganadoras}
+$$
+
+```{r ganadoras}
+# Calcular el indicador de diversidad
+temp <- contratos %>% 
+  group_by(nombre_entidad) %>% 
+  summarise(n_contratistas_dif = n_distinct(id_contratista),
+            n_contratos = n(),
+            ganadoras = (n_contratistas_dif/n_contratos)*100) %>% 
+  mutate(ganadoras = 100-ganadoras) %>% 
+  select(nombre_entidad, ganadoras)
+```
+
+
+```{r}
+# Agrupar los indicadores en una sola tabla
+indicadores <- indicadores %>% 
+  left_join(y = temp, by = "nombre_entidad")
+rm(temp)
+```
+
+## Índice de concentración de las cuatro empresas con mayor numero y valor de contratos - IC4k
+
+Mide el número de procesos que la entidad estatal adjudicó a los cuatro contratistas con más contratos. Un valor alto indicaría que hay pocos contratistas con muchos contratos.
+
+$$
+IC4K = \frac{\sum_{k=1}^{K} n_k}{N}
+$$
+Donde:
+
+- $k$: representa la posición del k-esimo contratista en numero o valor de contratos.
+- $K$: se tomaran los primeros 4 cuatro contratistas.
+- $n_k$: es el numero o valor de los contratos del contratista $k$.
+- $N$: es el numero o valor total de contratos de la entidad.
+
+
+```{r IC4K Cantidad}
+# Indice para el numero de contratos
+temp <- contratos %>% 
+  group_by(nombre_entidad, id_contratista) %>% 
+  summarise(nj = n()) %>% 
+  group_by(nombre_entidad) %>% 
+  mutate(Ni = sum(nj),
+         Pi = nj/Ni) %>% 
+  top_n(n = 4, wt = nj) %>% 
+  summarise(IC4K_cant = sum(Pi)*100)
+```
+
+
+```{r}
+# Agrupar los indicadores en una sola tabla
+indicadores <- indicadores %>% 
+  left_join(y = temp, by = "nombre_entidad")
+rm(temp)
+```
+
+
+```{r IC4K Valor}
+# Indice para el valor de los contratos
+temp <- contratos %>% 
+  group_by(nombre_entidad, id_contratista) %>% 
+  summarise(nj = sum(cuantia_contrato)) %>% 
+  group_by(nombre_entidad) %>% 
+  mutate(Ni = sum(nj),
+         Pi = nj/Ni) %>% 
+  top_n(n = 4, wt = nj) %>% 
+  summarise(IC4K_val = sum(Pi)*100)
+```
+
+
+```{r}
+# Agrupar los indicadores en una sola tabla
+indicadores <- indicadores %>% 
+  left_join(y = temp, by = "nombre_entidad")
+rm(temp)
+```
+
+# Indice de corrupción 
+
+El indice de corrupción para cada entidad se calcula como la media aritmética de los indices de corrupción estimados anteriormente. Esto se hace basado en el estudio de Zuleta & Caro (2019).
+
+```{r}
+indicadores <- indicadores %>% 
+  rowwise() %>% 
+  mutate(ind_riesgo_corrupcion = mean(c_across(perc_contr_directa_num:ID_val)))
+```
+
+# Resumen estadístico
+
+A continuación se presenta un resumen estadístico que muestra el comportamiento estadístico y la distribución de cada uno de los indicadores de corrupción.
+
+```{r}
+indicadores %>% 
+  select(-nombre_entidad) %>% 
+  summary() 
+```
+
+
+```{r, fig.height=10, fig.width=10}
+indicadores %>% 
+  pivot_longer(cols = c(perc_contr_directa_num:ind_riesgo_corrupcion), 
+               names_to = "indicador",
+               values_to = "valor") %>% 
+  ggplot(aes(x = valor)) +
+  geom_density() +
+  facet_wrap(vars(indicador), ncol = 3, scales = "free")
+```
+
+
+```{r}
+vroom_write(indicadores, path = "Datos/indicadores-corrupcion.csv", delim = ";")
+```
+
+
